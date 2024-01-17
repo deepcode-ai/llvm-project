@@ -40,8 +40,9 @@ class Module;
 
 /// Finds dbg.declare intrinsics declaring local variables as living in the
 /// memory that 'V' points to.
-void findDbgDeclares(SmallVectorImpl<DbgDeclareInst *> &DbgUsers, Value *V,
-                     SmallVectorImpl<DPValue *> *DPValues = nullptr);
+TinyPtrVector<DbgDeclareInst *> findDbgDeclares(Value *V);
+/// As above, for DPVDeclares.
+TinyPtrVector<DPValue *> findDPVDeclares(Value *V);
 
 /// Finds the llvm.dbg.value intrinsics describing a value.
 void findDbgValues(SmallVectorImpl<DbgValueInst *> &DbgValues,
@@ -57,6 +58,7 @@ DISubprogram *getDISubprogram(const MDNode *Scope);
 /// Produce a DebugLoc to use for each dbg.declare that is promoted to a
 /// dbg.value.
 DebugLoc getDebugValueLoc(DbgVariableIntrinsic *DII);
+DebugLoc getDebugValueLoc(DPValue *DPV);
 
 /// Strip debug info in the module if it exists.
 ///
@@ -189,6 +191,11 @@ AssignmentInstRange getAssignmentInsts(DIAssignID *ID);
 /// instruction (including by deleting or cloning instructions).
 inline AssignmentInstRange getAssignmentInsts(const DbgAssignIntrinsic *DAI) {
   return getAssignmentInsts(DAI->getAssignID());
+}
+inline AssignmentInstRange getAssignmentInsts(const DPValue *DPV) {
+  assert(DPV->isDbgAssign() &&
+         "Can't get assignment instructions for non-assign DPV!");
+  return getAssignmentInsts(DPV->getAssignID());
 }
 
 //

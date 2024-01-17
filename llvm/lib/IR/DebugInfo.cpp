@@ -44,6 +44,42 @@ using namespace llvm;
 using namespace llvm::at;
 using namespace llvm::dwarf;
 
+TinyPtrVector<DbgDeclareInst *> llvm::findDbgDeclares(Value *V) {
+  // This function is hot. Check whether the value has any metadata to avoid a
+  // DenseMap lookup.
+  if (!V->isUsedByMetadata())
+    return {};
+  auto *L = LocalAsMetadata::getIfExists(V);
+  if (!L)
+    return {};
+  auto *MDV = MetadataAsValue::getIfExists(V->getContext(), L);
+  if (!MDV)
+    return {};
+
+  TinyPtrVector<DbgDeclareInst *> Declares;
+  for (User *U : MDV->users())
+    if (auto *DDI = dyn_cast<DbgDeclareInst>(U))
+      Declares.push_back(DDI);
+
+  return Declares;
+}
+TinyPtrVector<DPValue *> llvm::findDPVDeclares(Value *V) {
+  // This function is hot. Check whether the value has any metadata to avoid a
+  // DenseMap lookup.
+  if (!V->isUsedByMetadata())
+    return {};
+  auto *L = LocalAsMetadata::getIfExists(V);
+  if (!L)
+    return {};
+
+  TinyPtrVector<DPValue *> Declares;
+  for (DPValue *DPV : L->getAllDPValueUsers())
+    if (DPV->getType() == DPValue::LocationType::Declare)
+      Declares.push_back(DPV);
+
+  return Declares;
+}
+
 template <typename IntrinsicT,
           DPValue::LocationType Type = DPValue::LocationType::Any>
 static void findDbgIntrinsics(SmallVectorImpl<IntrinsicT *> &Result, Value *V,
@@ -97,12 +133,6 @@ static void findDbgIntrinsics(SmallVectorImpl<IntrinsicT *> &Result, Value *V,
   }
 }
 
-void llvm::findDbgDeclares(SmallVectorImpl<DbgDeclareInst *> &DbgUsers,
-                           Value *V, SmallVectorImpl<DPValue *> *DPValues) {
-  findDbgIntrinsics<DbgDeclareInst, DPValue::LocationType::Declare>(DbgUsers, V,
-                                                                    DPValues);
-}
-
 void llvm::findDbgValues(SmallVectorImpl<DbgValueInst *> &DbgValues,
                          Value *V, SmallVectorImpl<DPValue *> *DPValues) {
   findDbgIntrinsics<DbgValueInst, DPValue::LocationType::Value>(DbgValues, V,
@@ -131,6 +161,18 @@ DebugLoc llvm::getDebugValueLoc(DbgVariableIntrinsic *DII) {
   // DebugLoc leaks into any adjacent instructions. Produce an unknown location
   // with the correct scope / inlinedAt fields.
   return DILocation::get(DII->getContext(), 0, 0, Scope, InlinedAt);
+}
+
+DebugLoc llvm::getDebugValueLoc(DPValue *DPV) {
+  // Original dbg.declare must have a location.
+  const DebugLoc &DeclareLoc = DPV->getDebugLoc();
+  MDNode *Scope = DeclareLoc.getScope();
+  DILocation *InlinedAt = DeclareLoc.getInlinedAt();
+  // Because no machine insts can come from debug intrinsics, only the scope
+  // and inlinedAt is significant. Zero line numbers are used in case this
+  // DebugLoc leaks into any adjacent instructions. Produce an unknown location
+  // with the correct scope / inlinedAt fields.
+  return DILocation::get(DPV->getContext(), 0, 0, Scope, InlinedAt);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1757,13 +1799,6 @@ void at::deleteAssignmentMarkers(const Instruction *Inst) {
 }
 
 void at::RAUW(DIAssignID *Old, DIAssignID *New) {
-  // Replace MetadataAsValue uses.
-  if (auto *OldIDAsValue =
-          MetadataAsValue::getIfExists(Old->getContext(), Old)) {
-    auto *NewIDAsValue = MetadataAsValue::get(Old->getContext(), New);
-    OldIDAsValue->replaceAllUsesWith(NewIDAsValue);
-  }
-
   // Replace attachments.
   AssignmentInstRange InstRange = getAssignmentInsts(Old);
   // Use intermediate storage for the instruction ptrs because the
@@ -1772,6 +1807,8 @@ void at::RAUW(DIAssignID *Old, DIAssignID *New) {
   SmallVector<Instruction *> InstVec(InstRange.begin(), InstRange.end());
   for (auto *I : InstVec)
     I->setMetadata(LLVMContext::MD_DIAssignID, New);
+
+  Old->replaceAllUsesWith(New);
 }
 
 void at::deleteAll(Function *F) {
@@ -1786,6 +1823,31 @@ void at::deleteAll(Function *F) {
   }
   for (auto *DAI : ToDelete)
     DAI->eraseFromParent();
+}
+
+/// Get the FragmentInfo for the variable if it exists, otherwise return a
+/// FragmentInfo that covers the entire variable if the variable size is
+/// known, otherwise return a zero-sized fragment.
+static DIExpression::FragmentInfo
+getFragmentOrEntireVariable(const DPValue *DPV) {
+  DIExpression::FragmentInfo VariableSlice(0, 0);
+  // Get the fragment or variable size, or zero.
+  if (auto Sz = DPV->getFragmentSizeInBits())
+    VariableSlice.SizeInBits = *Sz;
+  if (auto Frag = DPV->getExpression()->getFragmentInfo())
+    VariableSlice.OffsetInBits = Frag->OffsetInBits;
+  return VariableSlice;
+}
+
+static DIExpression::FragmentInfo
+getFragmentOrEntireVariable(const DbgVariableIntrinsic *DVI) {
+  DIExpression::FragmentInfo VariableSlice(0, 0);
+  // Get the fragment or variable size, or zero.
+  if (auto Sz = DVI->getFragmentSizeInBits())
+    VariableSlice.SizeInBits = *Sz;
+  if (auto Frag = DVI->getExpression()->getFragmentInfo())
+    VariableSlice.OffsetInBits = Frag->OffsetInBits;
+  return VariableSlice;
 }
 
 bool at::calculateFragmentIntersect(
@@ -1885,7 +1947,7 @@ bool at::calculateFragmentIntersect(
   if (DAI->isKillAddress())
     return false;
 
-  DIExpression::FragmentInfo VarFrag = DAI->getFragmentOrEntireVariable();
+  DIExpression::FragmentInfo VarFrag = getFragmentOrEntireVariable(DAI);
   if (VarFrag.SizeInBits == 0)
     return false; // Variable size is unknown.
 
@@ -2113,6 +2175,10 @@ void at::trackAssignments(Function::iterator Start, Function::iterator End,
 bool AssignmentTrackingPass::runOnFunction(Function &F) {
   // No value in assignment tracking without optimisations.
   if (F.hasFnAttribute(Attribute::OptimizeNone))
+    return /*Changed*/ false;
+
+  // FIXME: https://github.com/llvm/llvm-project/issues/76545
+  if (F.hasFnAttribute(Attribute::SanitizeHWAddress))
     return /*Changed*/ false;
 
   bool Changed = false;
