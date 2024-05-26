@@ -97,24 +97,28 @@ public:
   InitializePythonRAII() {
     InitializePythonHome();
 
+    // The table of built-in modules can only be extended before Python is
+    // initialized.
+    if (!Py_IsInitialized()) {
 #ifdef LLDB_USE_LIBEDIT_READLINE_COMPAT_MODULE
-    // Python's readline is incompatible with libedit being linked into lldb.
-    // Provide a patched version local to the embedded interpreter.
-    bool ReadlinePatched = false;
-    for (auto *p = PyImport_Inittab; p->name != nullptr; p++) {
-      if (strcmp(p->name, "readline") == 0) {
-        p->initfunc = initlldb_readline;
-        break;
+      // Python's readline is incompatible with libedit being linked into lldb.
+      // Provide a patched version local to the embedded interpreter.
+      bool ReadlinePatched = false;
+      for (auto *p = PyImport_Inittab; p->name != nullptr; p++) {
+        if (strcmp(p->name, "readline") == 0) {
+          p->initfunc = initlldb_readline;
+          break;
+        }
       }
-    }
-    if (!ReadlinePatched) {
-      PyImport_AppendInittab("readline", initlldb_readline);
-      ReadlinePatched = true;
-    }
+      if (!ReadlinePatched) {
+        PyImport_AppendInittab("readline", initlldb_readline);
+        ReadlinePatched = true;
+      }
 #endif
 
-    // Register _lldb as a built-in module.
-    PyImport_AppendInittab("_lldb", LLDBSwigPyInit);
+      // Register _lldb as a built-in module.
+      PyImport_AppendInittab("_lldb", LLDBSwigPyInit);
+    }
 
 // Python < 3.2 and Python >= 3.2 reversed the ordering requirements for
 // calling `Py_Initialize` and `PyEval_InitThreads`.  < 3.2 requires that you
@@ -1413,7 +1417,7 @@ bool ScriptInterpreterPythonImpl::GenerateScriptAliasFunction(
   sstr.Printf("def %s (debugger, args, exe_ctx, result, internal_dict):",
               auto_generated_function_name.c_str());
 
-  if (!GenerateFunction(sstr.GetData(), user_input, /*is_callback=*/true)
+  if (!GenerateFunction(sstr.GetData(), user_input, /*is_callback=*/false)
            .Success())
     return false;
 
@@ -2490,8 +2494,7 @@ bool ScriptInterpreterPythonImpl::LoadScriptingModule(
 
   auto ExtendSysPath = [&](std::string directory) -> llvm::Error {
     if (directory.empty()) {
-      return llvm::make_error<llvm::StringError>(
-          "invalid directory name", llvm::inconvertibleErrorCode());
+      return llvm::createStringError("invalid directory name");
     }
 
     replace_all(directory, "\\", "\\\\");
@@ -2504,10 +2507,8 @@ bool ScriptInterpreterPythonImpl::LoadScriptingModule(
                           directory.c_str(), directory.c_str());
     bool syspath_retval =
         ExecuteMultipleLines(command_stream.GetData(), exc_options).Success();
-    if (!syspath_retval) {
-      return llvm::make_error<llvm::StringError>(
-          "Python sys.path handling failed", llvm::inconvertibleErrorCode());
-    }
+    if (!syspath_retval)
+      return llvm::createStringError("Python sys.path handling failed");
 
     return llvm::Error::success();
   };

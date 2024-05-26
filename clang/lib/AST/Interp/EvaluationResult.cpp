@@ -66,7 +66,7 @@ static bool CheckArrayInitialized(InterpState &S, SourceLocation Loc,
                                   const Pointer &BasePtr,
                                   const ConstantArrayType *CAT) {
   bool Result = true;
-  size_t NumElems = CAT->getSize().getZExtValue();
+  size_t NumElems = CAT->getZExtSize();
   QualType ElemType = CAT->getElementType();
 
   if (ElemType->isRecordType()) {
@@ -101,10 +101,16 @@ static bool CheckFieldsInitialized(InterpState &S, SourceLocation Loc,
     Pointer FieldPtr = BasePtr.atField(F.Offset);
     QualType FieldType = F.Decl->getType();
 
+    // Don't check inactive union members.
+    if (R->isUnion() && !FieldPtr.isActive())
+      continue;
+
     if (FieldType->isRecordType()) {
       Result &= CheckFieldsInitialized(S, Loc, FieldPtr, FieldPtr.getRecord());
     } else if (FieldType->isIncompleteArrayType()) {
       // Nothing to do here.
+    } else if (F.Decl->isUnnamedBitField()) {
+      // Nothing do do here.
     } else if (FieldType->isArrayType()) {
       const auto *CAT =
           cast<ConstantArrayType>(FieldType->getAsArrayTypeUnsafe());

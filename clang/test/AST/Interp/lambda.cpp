@@ -222,3 +222,45 @@ namespace GH62611 {
     return 0;
   }
 }
+
+namespace LambdaToAPValue {
+  void wrapper() {
+    constexpr auto f = []() constexpr {
+      return 0;
+    };
+
+    constexpr auto g = [f]() constexpr {
+      return f();
+    };
+    static_assert(g() == f(), "");
+  }
+}
+
+namespace ns2_capture_this_byval {
+  struct S {
+    int s;
+    constexpr S(int s) : s{s} { }
+    constexpr auto f(S o) {
+      return [*this,o] (auto a) { return s + o.s + a.s; };
+    }
+  };
+
+  constexpr auto L = S{5}.f(S{10});
+  static_assert(L(S{100}) == 115, "");
+} // end test_captures_1::ns2_capture_this_byval
+
+namespace CaptureDefaults {
+  struct S {
+    int x;
+  };
+
+  constexpr auto f = [x = S{10}]() {
+      return x.x;
+  };
+  static_assert(f() == 10, "");
+
+  constexpr auto f2 = [x = 3]() {
+      return x;
+  };
+  static_assert(f2() == 3, "");
+}
